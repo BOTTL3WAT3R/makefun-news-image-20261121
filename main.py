@@ -1,85 +1,86 @@
 #!/usr/bin/env python3
-"""news-image-20261121 — entrypoint (standard library only).
+"""Entrypoint for the news-image-20261121 make.fun entry.
 
-The poster for Saturday 21 November 2026 was drawn once by render_poster.py
-(a Pillow program) and committed to this repository as entry.png. The
-make.fun runner installs nothing before it runs, so this entrypoint must
-not depend on Pillow: it simply copies the committed poster bytes to the
-output directory, verbatim and deterministically.
+The artwork for Saturday 21 November 2026 lives in this repository as
+``entry.png``. It was produced ahead of time by ``render_poster.py`` (a
+Pillow script that only ever runs on the author's machine), because the
+grading environment provides nothing beyond the Python standard library.
+This module therefore does exactly one job: place a byte-for-byte copy of
+the committed poster at ``entry.png`` inside the output directory.
 
-Writes $MAKEFUN_OUTPUT_DIR/entry.png (default /output/entry.png).
+The output directory is ``$MAKEFUN_OUTPUT_DIR`` when that variable is set
+and ``/output`` otherwise. The copy is verified by hashing both files, so
+a partial or corrupted write fails the run instead of submitting quietly.
 """
 
-import hashlib
-import os
-import shutil
-import sys
+from hashlib import sha256
+from os import environ, makedirs, path
+from shutil import copyfile
+from sys import exit as sys_exit
+from sys import stderr
 
-MAX_BYTES = 1024 * 1024  # competition cap: at most 1 MiB
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-
-
-def sha256_of(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+LIMIT_BYTES = 1_048_576  # entries may not exceed one mebibyte
+PNG_SIGNATURE = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
 
 
-def validate_poster(path: str) -> None:
-    """Fail loudly unless the committed poster is a PNG within the cap."""
-    size = os.path.getsize(path)
-    if size > MAX_BYTES:
-        raise ValueError(f"poster is {size} bytes, over the 1 MiB cap")
-    with open(path, "rb") as fh:
-        magic = fh.read(len(PNG_MAGIC))
-    if magic != PNG_MAGIC:
-        raise ValueError("poster does not start with the PNG magic bytes")
+def digest_of(filename):
+    """Streaming SHA-256 of a file, read in 64 KiB blocks."""
+    hasher = sha256()
+    with open(filename, "rb") as handle:
+        block = handle.read(65_536)
+        while block:
+            hasher.update(block)
+            block = handle.read(65_536)
+    return hasher.hexdigest()
 
 
-def source_path() -> str:
-    """Absolute path of the committed poster beside this file."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, "entry.png")
+def poster_file():
+    """Locate the committed poster next to this source file."""
+    folder = path.dirname(path.abspath(__file__))
+    return path.join(folder, "entry.png")
 
 
-def output_path() -> str:
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    return os.path.join(out_dir, "entry.png")
+def destination_file():
+    """Where the grader expects the finished image to appear."""
+    folder = environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    return path.join(folder, "entry.png")
 
 
-def main() -> int:
-    src = source_path()
-    dst = output_path()
+def check_poster(filename):
+    """Reject a poster that is oversized or not really a PNG."""
+    with open(filename, "rb") as handle:
+        head = handle.read(len(PNG_SIGNATURE))
+    if head != PNG_SIGNATURE:
+        raise ValueError("committed file lacks the PNG signature")
+    if path.getsize(filename) > LIMIT_BYTES:
+        raise ValueError("committed poster exceeds the 1 MiB limit")
 
-    if not os.path.isfile(src):
-        print(f"error: committed poster not found: {src}", file=sys.stderr)
+
+def run():
+    source = poster_file()
+    target = destination_file()
+
+    if not path.isfile(source):
+        print(f"missing committed poster: {source}", file=stderr)
         return 1
 
     try:
-        validate_poster(src)
-    except ValueError as exc:
-        print(f"error: invalid committed poster: {exc}", file=sys.stderr)
+        check_poster(source)
+    except (OSError, ValueError) as problem:
+        print(f"unusable committed poster: {problem}", file=stderr)
         return 1
 
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copyfile(src, dst)
+    makedirs(path.dirname(target), exist_ok=True)
+    copyfile(source, target)
 
-    # Read-back check: the written bytes must be identical to the source,
-    # so a truncated or corrupted copy can never pass silently.
-    src_sha = sha256_of(src)
-    dst_sha = sha256_of(dst)
-    if dst_sha != src_sha:
-        print(
-            f"error: output sha256 {dst_sha} != source sha256 {src_sha}",
-            file=sys.stderr,
-        )
+    if digest_of(target) != digest_of(source):
+        print("copy verification failed: hashes differ", file=stderr)
         return 1
 
-    print(f"wrote {dst} ({os.path.getsize(dst)} bytes, sha256 {dst_sha})")
+    size = path.getsize(target)
+    print(f"delivered {target}: {size} bytes, sha256 {digest_of(target)}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys_exit(run())
